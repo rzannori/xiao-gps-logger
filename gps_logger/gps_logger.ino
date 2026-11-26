@@ -13,7 +13,8 @@
  *      rosso lampeggiante = nessun dato dal GPS
  *
  * All'avvio il GPS (u-blox M8 del BN-220) viene configurato via comandi UBX:
- *   frequenza GPS_RATE_HZ, baud GPS_BAUD_FAST, solo frasi GGA+RMC, modello dinamico "Airborne".
+ *   frequenza GPS_RATE_HZ, baud GPS_BAUD_FAST, frasi RMC+GNS+VTG, modello dinamico "Airborne".
+ *   RMC+GNS+VTG e' la combinazione letta da RZ Flight Dashboard (stessa dell'SM GPS).
  *   (Il BN-220 non ha memoria flash: per questo lo riconfiguriamo ad ogni accensione.)
  *
  * DEBUG SERIALE (USB, 115200 baud) - comandi da Serial Monitor:
@@ -31,7 +32,7 @@
 #define GPS_CONFIGURE    1       // 1 = configura il GPS all'avvio (frequenza, baud, frasi)
 #define GPS_RATE_HZ      10      // 1, 5 o 10 posizioni al secondo (se 10 da' problemi prova 5)
 #define GPS_BAUD_DEFAULT 9600    // baud di fabbrica del BN-220
-#define GPS_BAUD_FAST    38400   // baud dopo la configurazione (sufficiente per GGA+RMC a 10 Hz)
+#define GPS_BAUD_FAST    38400   // baud dopo la configurazione (RMC+GNS+VTG a 10 Hz ~ 50% della banda)
 #define GPS_DYN_MODEL    8       // 0 = portatile, 7 = aereo <2g, 8 = aereo <4g (acrobazia)
 #define GPS_GSA_GSV      0       // 1 = aggiunge GSA/GSV (dettaglio satelliti) 1 volta al secondo
 #define FLUSH_INTERVAL   1000    // ms tra un salvataggio fisico su SD e l'altro (500-1000)
@@ -68,7 +69,7 @@ char lineBuf[128];
 uint8_t lineLen = 0;
 uint32_t lastFlush = 0, lastExtra = 0, lastGpsData = 0, lastReport = 0;
 
-// Stato GPS (da GGA)
+// Stato GPS (fix e ora da RMC, satelliti e HDOP da GNS o GGA)
 bool gpsFix = false;
 int  gpsSats = 0;
 char gpsHdop[8] = "-";
@@ -76,10 +77,10 @@ char gpsTime[12] = "-";
 
 // Contatori diagnostici
 struct {
-  uint32_t gpsBytes, sentences, csErrors, overflows, ggaCount;
+  uint32_t gpsBytes, sentences, csErrors, overflows, rmcCount;
   uint32_t linesWritten, bytesWritten, writeErrors, sdReinits;
   uint32_t maxFlushMs;
-  uint32_t bytesLastReport, ggaLastReport;
+  uint32_t bytesLastReport, rmcLastReport;
 } st = {0};
 
 bool echoNmea = false;     // eco NMEA su USB (all'inizio spento: troppo testo)
@@ -105,16 +106,22 @@ void nmeaField(const char *s, int n, char *out, size_t outLen) {
   out[i] = '\0';
 }
 
-void parseGGA(const char *s) {
-  if (strncmp(s + 3, "GGA", 3) != 0) return;
-  st.ggaCount++;
+// Estrae dalle frasi NMEA i dati per il report di stato e i LED
+void parseNmea(const char *s) {
+  const char *type = s + 3;                  // salta "$GN" / "$GP"
   char buf[12];
-  nmeaField(s, 1, buf, sizeof(buf));
-  if (strlen(buf) >= 6) snprintf(gpsTime, sizeof(gpsTime), "%.2s:%.2s:%.2s", buf, buf + 2, buf + 4);
-  nmeaField(s, 6, buf, sizeof(buf)); gpsFix = (buf[0] >= '1' && buf[0] <= '9');
-  nmeaField(s, 7, buf, sizeof(buf)); gpsSats = atoi(buf);
-  nmeaField(s, 8, gpsHdop, sizeof(gpsHdop));
-  if (!gpsHdop[0]) strcpy(gpsHdop, "-");
+  if (strncmp(type, "RMC", 3) == 0) {        // $GxRMC,hhmmss.ss,A/V,...
+    st.rmcCount++;
+    nmeaField(s, 1, buf, sizeof(buf));
+    if (strlen(buf) >= 6) snprintf(gpsTime, sizeof(gpsTime), "%.2s:%.2s:%.2s", buf, buf + 2, buf + 4);
+    nmeaField(s, 2, buf, sizeof(buf));
+    gpsFix = (buf[0] == 'A');
+  } else if (strncmp(type, "GNS", 3) == 0 || strncmp(type, "GGA", 3) == 0) {
+    // GNS e GGA hanno satelliti e HDOP negli stessi campi (7 e 8)
+    nmeaField(s, 7, buf, sizeof(buf)); gpsSats = atoi(buf);
+    nmeaField(s, 8, gpsHdop, sizeof(gpsHdop));
+    if (!gpsHdop[0]) strcpy(gpsHdop, "-");
+  }
 }
 
 // ---------------- CONFIGURAZIONE GPS (protocollo UBX u-blox) ----------------
@@ -178,16 +185,18 @@ void configureGPS() {
   Serial1.begin(gpsBaud);
   delay(100);
 
-  // Frasi NMEA: id 0=GGA 1=GLL 2=GSA 3=GSV 4=RMC 5=VTG
-  ubxSetNmeaRate(0x00, 1);                                   // GGA: posizione, quota, satelliti
-  ubxSetNmeaRate(0x04, 1);                                   // RMC: posizione, velocita', rotta, data
+  // Frasi NMEA: id 0=GGA 1=GLL 2=GSA 3=GSV 4=RMC 5=VTG 0x0D=GNS
+  // RMC+GNS+VTG = formato letto da RZ Flight Dashboard (quota solo da GNS, rotta da VTG)
+  ubxSetNmeaRate(0x04, 1);                                   // RMC: ora, data, posizione, validita' fix
+  ubxSetNmeaRate(0x0D, 1);                                   // GNS: quota, satelliti, HDOP
+  ubxSetNmeaRate(0x05, 1);                                   // VTG: velocita' e rotta
+  ubxSetNmeaRate(0x00, 0);                                   // GGA off (stessi dati di GNS)
   ubxSetNmeaRate(0x01, 0);                                   // GLL off
-  ubxSetNmeaRate(0x05, 0);                                   // VTG off (velocita' gia' in RMC)
   ubxSetNmeaRate(0x02, GPS_GSA_GSV ? GPS_RATE_HZ : 0);       // GSA
   ubxSetNmeaRate(0x03, GPS_GSA_GSV ? GPS_RATE_HZ : 0);       // GSV
   ubxSetDynModel(GPS_DYN_MODEL);
   ubxSetMeasRate(1000 / GPS_RATE_HZ);
-  DBGLN("[GPS] Comandi inviati (verifica 'Frequenza GGA' nel report)");
+  DBGLN("[GPS] Comandi inviati (verifica 'Frequenza RMC' nel report)");
 }
 
 bool openNewLogFile() {
@@ -238,14 +247,14 @@ void printStatus() {
   uint32_t now = millis();
   uint32_t dt = max(1UL, (unsigned long)(now - lastReport));
   uint32_t bps = (st.gpsBytes - st.bytesLastReport) * 1000UL / dt;
-  float ggaHz = (st.ggaCount - st.ggaLastReport) * 1000.0f / dt;
+  float rmcHz = (st.rmcCount - st.rmcLastReport) * 1000.0f / dt;
   Serial.println(F("---------------- STATO ----------------"));
   Serial.printf("Uptime         : %lu s\n", (unsigned long)(now / 1000));
   Serial.printf("GPS            : %s  (%lu byte/s, ultimo dato %lu ms fa)\n",
                 (now - lastGpsData) < 2000 ? "riceve dati" : "NESSUN DATO!",
                 (unsigned long)bps, (unsigned long)(now - lastGpsData));
-  Serial.printf("Frequenza GGA  : %.1f Hz (attesa %d Hz), seriale GPS %lu baud\n",
-                ggaHz, GPS_CONFIGURE ? GPS_RATE_HZ : 1, (unsigned long)gpsBaud);
+  Serial.printf("Frequenza RMC  : %.1f Hz (attesa %d Hz), seriale GPS %lu baud\n",
+                rmcHz, GPS_CONFIGURE ? GPS_RATE_HZ : 1, (unsigned long)gpsBaud);
   Serial.printf("Fix / satelliti: %s / %d   HDOP %s   ora UTC %s\n",
                 gpsFix ? "SI" : "no", gpsSats, gpsHdop, gpsTime);
   Serial.printf("Frasi NMEA     : %lu valide, %lu checksum errati, %lu troppo lunghe\n",
@@ -261,13 +270,13 @@ void printStatus() {
 #endif
   if (bps == 0 && now > 3000)
     Serial.println(F("!! Nessun byte dal GPS: controlla TX del BN-220 -> D7, alimentazione, baud"));
-  else if (GPS_CONFIGURE && now > 10000 && ggaHz < GPS_RATE_HZ * 0.8f)
+  else if (GPS_CONFIGURE && now > 10000 && rmcHz < GPS_RATE_HZ * 0.8f)
     Serial.println(F("!! Frequenza piu' bassa del previsto: configurazione non riuscita (prova 'g') o dati persi"));
   else if (st.csErrors > st.sentences / 10 && st.sentences > 20)
     Serial.println(F("!! Molti checksum errati: baud rate sbagliato o disturbi sulla linea"));
   Serial.println(F("---------------------------------------"));
   st.bytesLastReport = st.gpsBytes;
-  st.ggaLastReport = st.ggaCount;
+  st.rmcLastReport = st.rmcCount;
 #endif
   lastReport = millis();
 }
@@ -368,7 +377,7 @@ void loop() {
       lineBuf[lineLen] = '\0';
       if (lineLen > 6) {
         bool ok = nmeaChecksumOk(lineBuf);
-        if (ok) { st.sentences++; parseGGA(lineBuf); }
+        if (ok) { st.sentences++; parseNmea(lineBuf); }
         else    { st.csErrors++; if (echoNmea) DBGF("[CS ERR] %s\n", lineBuf); }
         if (ok || !LOG_ONLY_VALID) {
           writeLine(lineBuf);

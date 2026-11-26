@@ -5,7 +5,8 @@ Registra le frasi NMEA fino a **10 posizioni al secondo** su file di testo, con 
 
 ## Caratteristiche
 
-- Registrazione NMEA (GGA + RMC) su microSD, un nuovo file a ogni accensione (`GPS000.TXT`, `GPS001.TXT`, ...)
+- Registrazione NMEA (RMC + GNS + VTG) su microSD, un nuovo file a ogni accensione (`GPS000.TXT`, `GPS001.TXT`, ...)
+- File leggibili direttamente da [RZ Flight Dashboard](https://github.com/rzannori/rz-flight-dashboard)
 - Configurazione automatica del GPS all'avvio tramite comandi UBX:
   - frequenza 1 / 5 / **10 Hz**
   - seriale a 38400 baud
@@ -113,8 +114,8 @@ Serial Monitor a **115200 baud**. Ogni 5 s viene stampato un report:
 ```
 ---------------- STATO ----------------
 Uptime         : 125 s
-GPS            : riceve dati  (1500 byte/s, ultimo dato 40 ms fa)
-Frequenza GGA  : 10.0 Hz (attesa 10 Hz), seriale GPS 38400 baud
+GPS            : riceve dati  (1900 byte/s, ultimo dato 40 ms fa)
+Frequenza RMC  : 10.0 Hz (attesa 10 Hz), seriale GPS 38400 baud
 Fix / satelliti: SI / 9   HDOP 0.92   ora UTC 14:32:07
 Frasi NMEA     : 2500 valide, 0 checksum errati, 0 troppo lunghe
 SD             : OK  file GPS004.TXT  (2625 righe, 172310 byte)
@@ -141,14 +142,32 @@ Comandi (da scrivere nel Serial Monitor):
 Testo NMEA standard, una frase per riga:
 
 ```
-$GNRMC,143207.00,A,4507.12345,N,00740.12345,E,25.3,182.4,231126,,,A*7B
-$GNGGA,143207.00,4507.12345,N,00740.12345,E,1,09,0.92,312.4,M,47.1,M,,*4C
-$PXIAO,125034,27.5*3A
+$GNRMC,143207.00,A,4507.12345,N,00740.12345,E,13.66,182.4,231126,,,A*xx
+$GNGNS,143207.00,4507.12345,N,00740.12345,E,AAN,09,0.92,312.4,47.1,,,V*xx
+$GNVTG,182.4,T,,M,13.66,N,25.30,K,A*xx
+$PXIAO,125034,27.5*xx
 ```
+
+| Frase | Contenuto |
+|---|---|
+| `RMC` | ora, data, posizione, validità del fix (`A` = valido, `V` = non valido) |
+| `GNS` | posizione, quota, satelliti, HDOP |
+| `VTG` | velocità (km/h) e rotta |
 
 `$PXIAO,<millis>,<temperatura CPU>[,ax,ay,az,gx,gy,gz]` è una frase proprietaria: i programmi NMEA la ignorano.
 
-I file si possono aprire con **GPS Visualizer** (gpsvisualizer.com), **GPSBabel** (conversione in GPX/KML per Google Earth), QGIS e simili.
+### Lettura con RZ Flight Dashboard
+
+La combinazione RMC + GNS + VTG è quella che la dashboard riconosce (la stessa dell'SM GPS): basta aprire il file
+`GPSxxx.TXT` con **Apri → Dal computer / telefono**. Il formato viene riconosciuto dal contenuto, l'estensione non conta.
+
+Canali disponibili: posizione, velocità, rotta, quota GPS, quota relativa, satelliti, HDOP.
+Il BN-220 non ha barometro: la quota è quella GPS (meno precisa di quella barometrica) e il canale *Vario* non è presente,
+quindi l'analisi di termiche e planata è limitata.
+
+> Non tornare a GGA: la dashboard legge la quota **solo** dalle frasi GNS e scarta i file senza quota.
+
+Gli stessi file si possono aprire anche con **GPS Visualizer** (gpsvisualizer.com), **GPSBabel** (conversione in GPX/KML per Google Earth), QGIS e simili.
 
 ## Risoluzione dei problemi
 
@@ -159,6 +178,6 @@ I file si possono aprire con **GPS Visualizer** (gpsvisualizer.com), **GPSBabel*
 | `Python non è stato trovato ... exit status 9009` | Le versioni recenti del core richiedono Python: installalo da python.org (o attiva `python.exe` in *Impostazioni → App → Impostazioni app avanzate → Alias di esecuzione app* se usi il *Python install manager*) e riavvia l'IDE |
 | `SD non trovata` | Controlla cablaggio, `SD_CS_PIN`, tensione del modulo (3,3 V o 5 V) e formattazione FAT32 |
 | `Nessun byte dal GPS` | Inverti TX/RX del BN-220 (D6/D7) e controlla l'alimentazione |
-| Frequenza GGA più bassa del previsto | Prova il comando `g`; se persiste usa `GPS_RATE_HZ 5` |
+| Frequenza RMC più bassa del previsto | Prova il comando `g`; se persiste usa `GPS_RATE_HZ 5` |
 | Molti checksum errati | Disturbi o dati persi: scendi a 5 Hz, tieni i fili corti e lontani da ESC e cavi di potenza |
 | Nessun fix | Il primo aggancio richiede da 30 s a qualche minuto **all'aperto** |
