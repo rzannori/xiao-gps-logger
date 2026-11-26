@@ -5,7 +5,8 @@ Registra le frasi NMEA fino a **10 posizioni al secondo** su file di testo, con 
 
 ## Caratteristiche
 
-- Registrazione NMEA (RMC + GNS + VTG) su microSD, un nuovo file a ogni accensione (`GPS000.TXT`, `GPS001.TXT`, ...)
+- Registrazione NMEA (RMC + GNS + VTG) su microSD, un nuovo file a ogni accensione,
+  nominato con **data e ora locali** del GPS: `20261126/202103.TXT`
 - File leggibili direttamente da [RZ Flight Dashboard](https://github.com/rzannori/rz-flight-dashboard)
 - Configurazione automatica del GPS all'avvio tramite comandi UBX:
   - frequenza 1 / 5 / **10 Hz**
@@ -91,6 +92,10 @@ Tutti i parametri sono in cima allo sketch:
 | `GPS_BAUD_FAST` | `38400` | Baud del GPS dopo la configurazione |
 | `GPS_DYN_MODEL` | `8` | 0 = portatile, 7 = aereo <2g, 8 = aereo <4g |
 | `GPS_GSA_GSV` | `0` | 1 = aggiunge il dettaglio satelliti (1 volta al secondo) |
+| `TZ_OFFSET_H` | `1` | Fuso orario rispetto a UTC per i nomi dei file (Italia = 1) |
+| `TZ_EU_DST` | `1` | Applica l'ora legale europea |
+| `NODATE_TIMEOUT_S` | `120` | Se il GPS non fornisce la data entro questo tempo, usa i nomi `GPS000.TXT`... |
+| `FILE_TIMESTAMP` | `1` | Data/ora del file sulla SD (visibile in Esplora risorse); se non compila metti `0` |
 | `FLUSH_INTERVAL` | `1000` | ms tra un salvataggio fisico su SD e l'altro |
 | `LOG_ONLY_VALID` | `1` | Scrive solo frasi con checksum corretto |
 | `LOG_EXTRA` | `1` | Riga `$PXIAO` con temperatura CPU (+ IMU) |
@@ -118,7 +123,7 @@ GPS            : riceve dati  (1900 byte/s, ultimo dato 40 ms fa)
 Frequenza RMC  : 10.0 Hz (attesa 10 Hz), seriale GPS 38400 baud
 Fix / satelliti: SI / 9   HDOP 0.92   ora UTC 14:32:07
 Frasi NMEA     : 2500 valide, 0 checksum errati, 0 troppo lunghe
-SD             : OK  file GPS004.TXT  (2625 righe, 172310 byte)
+SD             : OK  file 20261126/143207.TXT  (2625 righe, 172310 byte)
 Errori SD      : 0 scritture fallite, 0 reinizializzazioni, flush max 13 ms
 Temperatura CPU: 27.5 C
 ---------------------------------------
@@ -133,11 +138,31 @@ Comandi (da scrivere nel Serial Monitor):
 | `e` | Eco delle frasi NMEA on/off |
 | `r` | Report automatico on/off |
 | `f` | Flush immediato su SD |
-| `l` | Elenco file sulla SD |
+| `l` | Elenco cartelle e file sulla SD |
 | `g` | Riconfigura il GPS |
 | `p` | Passthrough USB ↔ GPS (per u-center), uscita con `+++` |
 
 ## Formato dei file
+
+### Nomi
+
+Una cartella per giorno e un file per ogni accensione, con data e ora **locali** (fuso e ora legale da `TZ_OFFSET_H` / `TZ_EU_DST`):
+
+```
+20261126/
+    143207.TXT      ← 26/11/2026, registrazione iniziata alle 14:32:07
+    161540.TXT
+20261127/
+    101205.TXT
+```
+
+- La libreria SD accetta solo nomi corti (8 caratteri + estensione): per questo la data è nella cartella e l'ora nel file.
+- Il file viene creato appena il GPS conosce la data, di solito pochi secondi dopo l'accensione e spesso prima del fix.
+  Le righe ricevute prima, senza data né posizione, non vengono registrate.
+- Se la data non arriva entro `NODATE_TIMEOUT_S` (120 s), il logger registra comunque su `GPS000.TXT`, `GPS001.TXT`... nella cartella principale.
+- Anche la data/ora del file sulla SD è quella del GPS (con `FILE_TIMESTAMP 1`).
+
+### Contenuto
 
 Testo NMEA standard, una frase per riga:
 
@@ -180,4 +205,6 @@ Gli stessi file si possono aprire anche con **GPS Visualizer** (gpsvisualizer.co
 | `Nessun byte dal GPS` | Inverti TX/RX del BN-220 (D6/D7) e controlla l'alimentazione |
 | Frequenza RMC più bassa del previsto | Prova il comando `g`; se persiste usa `GPS_RATE_HZ 5` |
 | Molti checksum errati | Disturbi o dati persi: scendi a 5 Hz, tieni i fili corti e lontani da ESC e cavi di potenza |
+| `SD: in attesa della data GPS` | Normale nei primi secondi: il file viene creato appena il GPS ha data e ora |
+| Errore di compilazione su `SdFile::dateTimeCallback` | Metti `FILE_TIMESTAMP 0`: i nomi con la data funzionano lo stesso |
 | Nessun fix | Il primo aggancio richiede da 30 s a qualche minuto **all'aperto** |

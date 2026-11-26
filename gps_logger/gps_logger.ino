@@ -9,6 +9,11 @@
  *   BN-220 TX -> D7 (RX Serial1)   BN-220 RX -> D6 (TX Serial1)
  *   SD  SCK -> D8,  MISO -> D9,  MOSI -> D10,  CS -> SD_CS_PIN
  *
+ * FILE: una cartella per giorno e un file per accensione, con data e ora locali del GPS:
+ *   /20261126/192103.TXT  (= 26 novembre 2026, registrazione iniziata alle 19:21:03)
+ *   Il file viene creato appena il GPS conosce la data (di solito pochi secondi dopo l'accensione).
+ *   Se la data non arriva entro NODATE_TIMEOUT_S, si registra comunque su GPS000.TXT, GPS001.TXT...
+ *
  * LED: verde lampeggia = fix, blu = dati GPS senza fix, rosso fisso = errore SD,
  *      rosso lampeggiante = nessun dato dal GPS
  *
@@ -35,6 +40,10 @@
 #define GPS_BAUD_FAST    38400   // baud dopo la configurazione (RMC+GNS+VTG a 10 Hz ~ 50% della banda)
 #define GPS_DYN_MODEL    8       // 0 = portatile, 7 = aereo <2g, 8 = aereo <4g (acrobazia)
 #define GPS_GSA_GSV      0       // 1 = aggiunge GSA/GSV (dettaglio satelliti) 1 volta al secondo
+#define TZ_OFFSET_H      1       // fuso orario rispetto a UTC (Italia = 1)
+#define TZ_EU_DST        1       // 1 = applica l'ora legale europea (ultima dom. di marzo -> ultima dom. di ottobre)
+#define NODATE_TIMEOUT_S 120     // se il GPS non da' la data entro X s, usa i nomi GPS000.TXT...
+#define FILE_TIMESTAMP   1       // 1 = data/ora del file su SD (visibile in Esplora risorse). Se non compila metti 0
 #define FLUSH_INTERVAL   1000    // ms tra un salvataggio fisico su SD e l'altro (500-1000)
 #define LOG_ONLY_VALID   1       // 1 = scrive solo frasi con checksum corretto
 #define LOG_EXTRA        1       // 1 = riga $PXIAO ogni secondo (temperatura CPU, +IMU)
@@ -63,8 +72,9 @@
 #endif
 
 File logFile;
-char logName[13] = "-";
-bool sdOk = false;
+char logName[24] = "-";
+bool sdOk = false;         // scheda montata
+bool fileOpen = false;     // file di log aperto
 char lineBuf[128];
 uint8_t lineLen = 0;
 uint32_t lastFlush = 0, lastExtra = 0, lastGpsData = 0, lastReport = 0;
@@ -74,6 +84,10 @@ bool gpsFix = false;
 int  gpsSats = 0;
 char gpsHdop[8] = "-";
 char gpsTime[12] = "-";
+
+// Data e ora UTC dall'ultima RMC (valide anche prima del fix, appena il GPS conosce l'ora)
+bool gpsDateOk = false;
+int  utcY, utcMo, utcD, utcH, utcMi, utcS;
 
 // Contatori diagnostici
 struct {
@@ -116,6 +130,21 @@ void parseNmea(const char *s) {
     if (strlen(buf) >= 6) snprintf(gpsTime, sizeof(gpsTime), "%.2s:%.2s:%.2s", buf, buf + 2, buf + 4);
     nmeaField(s, 2, buf, sizeof(buf));
     gpsFix = (buf[0] == 'A');
+    char tm[12], dt[8];
+    nmeaField(s, 1, tm, sizeof(tm));
+    nmeaField(s, 9, dt, sizeof(dt));               // ddmmyy
+    if (strlen(tm) >= 6 && strlen(dt) == 6) {
+      int yy = (dt[4] - '0') * 10 + (dt[5] - '0');
+      if (yy >= 24 && yy <= 79) {                  // scarta date di default (es. 2080) prima della sincronizzazione
+        utcD  = (dt[0] - '0') * 10 + (dt[1] - '0');
+        utcMo = (dt[2] - '0') * 10 + (dt[3] - '0');
+        utcY  = 2000 + yy;
+        utcH  = (tm[0] - '0') * 10 + (tm[1] - '0');
+        utcMi = (tm[2] - '0') * 10 + (tm[3] - '0');
+        utcS  = (tm[4] - '0') * 10 + (tm[5] - '0');
+        gpsDateOk = true;
+      }
+    }
   } else if (strncmp(type, "GNS", 3) == 0 || strncmp(type, "GGA", 3) == 0) {
     // GNS e GGA hanno satelliti e HDOP negli stessi campi (7 e 8)
     nmeaField(s, 7, buf, sizeof(buf)); gpsSats = atoi(buf);
@@ -199,40 +228,123 @@ void configureGPS() {
   DBGLN("[GPS] Comandi inviati (verifica 'Frequenza RMC' nel report)");
 }
 
-bool openNewLogFile() {
+// ---------------- DATA/ORA LOCALE ----------------
+// Giorni dal 1/1/1970 <-> data civile (algoritmo di H. Hinnant)
+long daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= m <= 2;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + (long)doe - 719468;
+}
+void civilFromDays(long z, int &y, int &m, int &d) {
+  z += 719468;
+  long era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned doe = (unsigned)(z - era * 146097);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  d = doy - (153 * mp + 2) / 5 + 1;
+  m = mp < 10 ? mp + 3 : mp - 9;
+  y = (int)(yoe + era * 400) + (m <= 2);
+}
+long lastSunday(int y, int m) {                  // giorno (epoch) dell'ultima domenica del mese (marzo/ottobre: 31 giorni)
+  long last = daysFromCivil(y, m, 31);
+  return last - ((last + 4) % 7);                // 1/1/1970 era giovedi' (4); 0 = domenica
+}
+// Converte l'ora UTC del GPS in ora locale (fuso + ora legale europea)
+void localDateTime(int &y, int &mo, int &d, int &h, int &mi, int &se) {
+  int64_t t = (int64_t)daysFromCivil(utcY, utcMo, utcD) * 86400 + utcH * 3600L + utcMi * 60L + utcS;
+  int64_t off = TZ_OFFSET_H * 3600L;
+#if TZ_EU_DST
+  int64_t dstStart = (int64_t)lastSunday(utcY, 3) * 86400 + 3600;    // 01:00 UTC
+  int64_t dstEnd   = (int64_t)lastSunday(utcY, 10) * 86400 + 3600;
+  if (t >= dstStart && t < dstEnd) off += 3600;
+#endif
+  t += off;
+  long days = (long)(t / 86400);
+  long sec  = (long)(t % 86400);
+  civilFromDays(days, y, mo, d);
+  h = sec / 3600; mi = (sec / 60) % 60; se = sec % 60;
+}
+
+#if FILE_TIMESTAMP
+// Data/ora scritte nella directory della SD (creazione e ultima modifica del file)
+void fatDateTime(uint16_t *date, uint16_t *time) {
+  int y = 2000, mo = 1, d = 1, h = 0, mi = 0, se = 0;
+  if (gpsDateOk) localDateTime(y, mo, d, h, mi, se);
+  *date = (uint16_t)(((y - 1980) << 9) | (mo << 5) | d);
+  *time = (uint16_t)((h << 11) | (mi << 5) | (se >> 1));
+}
+#endif
+
+// ---------------- FILE DI LOG ----------------
+bool openLogFile(const char *path) {
+  logFile = SD.open(path, FILE_WRITE);
+  if (!logFile) { DBGF("[SD] ERRORE: impossibile creare %s\n", path); return false; }
+  strncpy(logName, path, sizeof(logName) - 1);
+  DBGF("[SD] Log su: %s\n", logName);
+  return true;
+}
+
+// /AAAAMMGG/hhmmss.TXT con data e ora locali
+bool openDatedLogFile() {
+  int y, mo, d, h, mi, se;
+  localDateTime(y, mo, d, h, mi, se);
+  char dir[10], path[24];
+  snprintf(dir, sizeof(dir), "%04d%02d%02d", y, mo, d);
+  if (!SD.exists(dir) && !SD.mkdir(dir)) { DBGF("[SD] ERRORE: impossibile creare la cartella %s\n", dir); return false; }
+  snprintf(path, sizeof(path), "%s/%02d%02d%02d.TXT", dir, h, mi, se);
+  for (char c = 'A'; SD.exists(path) && c <= 'Z'; c++)        // gia' esistente: 192103A.TXT, 192103B.TXT...
+    snprintf(path, sizeof(path), "%s/%02d%02d%02d%c.TXT", dir, h, mi, se, c);
+  return openLogFile(path);
+}
+
+// GPS000.TXT, GPS001.TXT... (solo se il GPS non fornisce la data)
+bool openNumberedLogFile() {
+  char path[16];
   for (int i = 0; i < 1000; i++) {
-    snprintf(logName, sizeof(logName), "GPS%03d.TXT", i);
-    if (!SD.exists(logName)) {
-      logFile = SD.open(logName, FILE_WRITE);
-      if (logFile) { DBGF("[SD] Log su: %s\n", logName); return true; }
-      DBGF("[SD] ERRORE: impossibile creare %s\n", logName);
-      return false;
-    }
+    snprintf(path, sizeof(path), "GPS%03d.TXT", i);
+    if (!SD.exists(path)) return openLogFile(path);
   }
   DBGLN("[SD] ERRORE: GPS000..GPS999 gia' tutti presenti");
   return false;
 }
 
+// Apre il file quando la data e' nota (o, scaduto il tempo, con nome numerato)
+void tryOpenLogFile() {
+  if (!sdOk || fileOpen) return;
+  if (gpsDateOk)                                     fileOpen = openDatedLogFile();
+  else if (millis() > NODATE_TIMEOUT_S * 1000UL) {
+    DBGLN("[SD] Data GPS non disponibile: uso un nome numerato");
+    fileOpen = openNumberedLogFile();
+  } else return;
+  if (!fileOpen) { sdOk = false; led(LED_RED, true); }
+}
+
 bool initSD() {
   DBGF("[SD] Inizializzazione (CS = D%d)... ", SD_CS_PIN);
   SD.end();
+  fileOpen = false;
   if (!SD.begin(SD_CS_PIN)) {
     DBGLN("FALLITA");
     DBGLN("[SD]  -> controlla: cablaggio SCK/MISO/MOSI/CS, alimentazione modulo (3V3 o 5V?),");
     DBGLN("[SD]     scheda inserita, formattata FAT32, pin SD_CS_PIN corretto");
     return false;
   }
-  DBGLN("OK");
-  return openNewLogFile();
+  DBGLN(gpsDateOk ? "OK" : "OK (il file verra' creato appena il GPS conosce la data)");
+  return true;
 }
 
 void writeLine(const char *s) {
-  if (!sdOk) return;
+  if (!sdOk || !fileOpen) return;
   size_t n = logFile.println(s);
   if (n == 0) {
     st.writeErrors++;
     DBGLN("[SD] ERRORE scrittura (scheda rimossa o piena?) - riprovo tra 5 s");
     logFile.close();
+    fileOpen = false;
     sdOk = false;
     led(LED_RED, true);
     return;
@@ -260,7 +372,7 @@ void printStatus() {
   Serial.printf("Frasi NMEA     : %lu valide, %lu checksum errati, %lu troppo lunghe\n",
                 (unsigned long)st.sentences, (unsigned long)st.csErrors, (unsigned long)st.overflows);
   Serial.printf("SD             : %s  file %s  (%lu righe, %lu byte)\n",
-                sdOk ? "OK" : "ERRORE", logName,
+                !sdOk ? "ERRORE" : (fileOpen ? "OK" : "in attesa della data GPS"), logName,
                 (unsigned long)st.linesWritten, (unsigned long)st.bytesWritten);
   Serial.printf("Errori SD      : %lu scritture fallite, %lu reinizializzazioni, flush max %lu ms\n",
                 (unsigned long)st.writeErrors, (unsigned long)st.sdReinits, (unsigned long)st.maxFlushMs);
@@ -281,15 +393,25 @@ void printStatus() {
   lastReport = millis();
 }
 
+void listDir(File dir, int depth) {
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    if (f.isDirectory()) {
+      DBGF("   %*s%s/\n", depth * 3, "", f.name());
+      if (depth < 1) listDir(f, depth + 1);
+    } else {
+      DBGF("   %*s%-13s %10lu byte\n", depth * 3, "", f.name(), (unsigned long)f.size());
+    }
+    f.close();
+  }
+}
+
 void listFiles() {
 #if DEBUG
   if (!sdOk) { DBGLN("[SD] Scheda non disponibile"); return; }
+  if (fileOpen) logFile.flush();
   File root = SD.open("/");
   DBGLN("[SD] File sulla scheda:");
-  for (File f = root.openNextFile(); f; f = root.openNextFile()) {
-    DBGF("   %-13s %10lu byte\n", f.name(), (unsigned long)f.size());
-    f.close();
-  }
+  listDir(root, 0);
   root.close();
 #endif
 }
@@ -297,7 +419,7 @@ void listFiles() {
 // Ponte trasparente USB <-> GPS: permette di usare u-center per configurare il BN-220
 void passthrough() {
   DBGLN("[PT] Passthrough attivo. Logging sospeso. Scrivi +++ per uscire.");
-  if (sdOk) logFile.flush();
+  if (fileOpen) logFile.flush();
   uint8_t plus = 0;
   while (true) {
     while (Serial1.available()) Serial.write(Serial1.read());
@@ -322,7 +444,7 @@ void handleCommands() {
       case 's': printStatus(); break;
       case 'e': echoNmea = !echoNmea;  DBGF("[CMD] Eco NMEA %s\n", echoNmea ? "ON" : "OFF"); break;
       case 'r': autoReport = !autoReport; DBGF("[CMD] Report automatico %s\n", autoReport ? "ON" : "OFF"); break;
-      case 'f': if (sdOk) { logFile.flush(); DBGLN("[CMD] Flush eseguito"); } break;
+      case 'f': if (fileOpen) { logFile.flush(); DBGLN("[CMD] Flush eseguito"); } break;
       case 'l': listFiles(); break;
       case 'g': configureGPS(); break;
       case 'p': passthrough(); break;
@@ -349,6 +471,9 @@ void setup() {
   DBGF("Config: SD CS=D%d, flush %d ms, solo validi=%d, extra=%d, IMU=%d\n",
        SD_CS_PIN, FLUSH_INTERVAL, LOG_ONLY_VALID, LOG_EXTRA, USE_IMU);
 
+#if FILE_TIMESTAMP
+  SdFile::dateTimeCallback(fatDateTime);
+#endif
 #if GPS_CONFIGURE
   configureGPS();
 #else
@@ -415,7 +540,8 @@ void loop() {
 #endif
 
   // 3) Flush periodico (misura anche quanto dura: se e' lento la SD e' scarsa)
-  if (sdOk && now - lastFlush >= FLUSH_INTERVAL) {
+  tryOpenLogFile();
+  if (fileOpen && now - lastFlush >= FLUSH_INTERVAL) {
     lastFlush = now;
     uint32_t t = millis();
     logFile.flush();
