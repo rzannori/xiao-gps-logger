@@ -6,7 +6,7 @@ Registra le frasi NMEA fino a **10 posizioni al secondo** su file di testo, con 
 ## Caratteristiche
 
 - Registrazione NMEA (RMC + GNS + VTG) su microSD, un nuovo file a ogni accensione,
-  nominato con **data e ora locali** del GPS: `20261126/202103.TXT`
+  nominato con **data e ora locali** del GPS: `261126/202103.TXT` (cartella `ggmmaa`)
 - File leggibili direttamente da [RZ Flight Dashboard](https://github.com/rzannori/rz-flight-dashboard)
 - Configurazione automatica del GPS all'avvio tramite comandi UBX:
   - frequenza 1 / 5 / **10 Hz**
@@ -123,7 +123,7 @@ GPS            : riceve dati  (1900 byte/s, ultimo dato 40 ms fa)
 Frequenza RMC  : 10.0 Hz (attesa 10 Hz), seriale GPS 38400 baud
 Fix / satelliti: SI / 9   HDOP 0.92   ora UTC 14:32:07
 Frasi NMEA     : 2500 valide, 0 checksum errati, 0 troppo lunghe
-SD             : OK  file 20261126/143207.TXT  (2625 righe, 172310 byte)
+SD             : OK  file 261126/143207.TXT  (2625 righe, 172310 byte)
 Errori SD      : 0 scritture fallite, 0 reinizializzazioni, flush max 13 ms
 Temperatura CPU: 27.5 C
 ---------------------------------------
@@ -146,13 +146,13 @@ Comandi (da scrivere nel Serial Monitor):
 
 ### Nomi
 
-Una cartella per giorno e un file per ogni accensione, con data e ora **locali** (fuso e ora legale da `TZ_OFFSET_H` / `TZ_EU_DST`):
+Una cartella per giorno (formato `ggmmaa`) e un file per ogni accensione (`hhmmss`), con data e ora **locali** (fuso e ora legale da `TZ_OFFSET_H` / `TZ_EU_DST`):
 
 ```
-20261126/
+261126/
     143207.TXT      ← 26/11/2026, registrazione iniziata alle 14:32:07
     161540.TXT
-20261127/
+271126/
     101205.TXT
 ```
 

@@ -10,7 +10,7 @@
  *   SD  SCK -> D8,  MISO -> D9,  MOSI -> D10,  CS -> SD_CS_PIN
  *
  * FILE: una cartella per giorno e un file per accensione, con data e ora locali del GPS:
- *   /20261126/192103.TXT  (= 26 novembre 2026, registrazione iniziata alle 19:21:03)
+ *   /261126/192103.TXT  (= 26 novembre 2026, registrazione iniziata alle 19:21:03)
  *   Il file viene creato appena il GPS conosce la data (di solito pochi secondi dopo l'accensione).
  *   Se la data non arriva entro NODATE_TIMEOUT_S, si registra comunque su GPS000.TXT, GPS001.TXT...
  *
@@ -288,12 +288,12 @@ bool openLogFile(const char *path) {
   return true;
 }
 
-// /AAAAMMGG/hhmmss.TXT con data e ora locali
+// /ggmmaa/hhmmss.TXT con data e ora locali
 bool openDatedLogFile() {
   int y, mo, d, h, mi, se;
   localDateTime(y, mo, d, h, mi, se);
   char dir[10], path[24];
-  snprintf(dir, sizeof(dir), "%04d%02d%02d", y, mo, d);
+  snprintf(dir, sizeof(dir), "%02d%02d%02d", d, mo, y % 100);   // ggmmaa
   if (!SD.exists(dir) && !SD.mkdir(dir)) { DBGF("[SD] ERRORE: impossibile creare la cartella %s\n", dir); return false; }
   snprintf(path, sizeof(path), "%s/%02d%02d%02d.TXT", dir, h, mi, se);
   for (char c = 'A'; SD.exists(path) && c <= 'Z'; c++)        // gia' esistente: 192103A.TXT, 192103B.TXT...
